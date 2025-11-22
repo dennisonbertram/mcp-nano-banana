@@ -4,7 +4,7 @@
 
 ## Overview
 
-This directory contains reference materials, contributing guidelines, and project status documentation.
+This directory contains reference materials and contributing guidelines.
 
 ## Documents
 
@@ -13,7 +13,6 @@ This directory contains reference materials, contributing guidelines, and projec
 | Date | Document | Status | Description |
 |------|----------|--------|-------------|
 | - | [contributing.md](./contributing.md) | Active | Contribution guidelines for developers |
-| 2025-11-22 | [npm-ready-summary-2025-11-22.md](./npm-ready-summary-2025-11-22.md) | Active | NPM package readiness summary and verification |
 
 ## Related Categories
 
@@ -25,4 +24,4 @@ Reference documents include:
 - Contributing guidelines
 - Code of conduct
 - Standards and specifications
-- Project status and readiness summaries
+- Command references

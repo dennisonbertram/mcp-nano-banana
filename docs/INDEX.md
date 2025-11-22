@@ -15,16 +15,14 @@ This directory contains all project documentation organized by category. Each su
 
 | Date | Category | Document | Description |
 |------|----------|----------|-------------|
-| 2025-11-22 | guides | [publishing-to-npm-2025-11-22.md](./guides/publishing-to-npm-2025-11-22.md) | NPM publishing checklist |
-| 2025-11-22 | reference | [npm-ready-summary-2025-11-22.md](./reference/npm-ready-summary-2025-11-22.md) | Package readiness verification |
-| - | reference | [contributing.md](./reference/contributing.md) | Contribution guidelines |
+| - | reference | [contributing.md](./reference/contributing.md) | Contribution guidelines for developers |
 
 ## Document Count by Category
 
-- Guides: 1 document
-- Reference: 2 documents
+- Guides: 0 documents
+- Reference: 1 document
 
-**Total**: 3 documents
+**Total**: 1 document
 
 ## How to Use This Documentation
 

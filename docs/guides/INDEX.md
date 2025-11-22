@@ -4,15 +4,16 @@
 
 ## Overview
 
-This directory contains how-to guides and tutorials for MCP Nano Banana.
+This directory is reserved for how-to guides and tutorials for MCP Nano Banana.
 
 ## Documents
 
 ### Active Documents
 
-| Date | Document | Status | Description |
-|------|----------|--------|-------------|
-| 2025-11-22 | [publishing-to-npm-2025-11-22.md](./publishing-to-npm-2025-11-22.md) | Active | Complete NPM publishing checklist and instructions |
+No guides currently. Future guides may include:
+- Setup and installation walkthroughs
+- Integration tutorials
+- Advanced usage patterns
 
 ## Related Categories
 
