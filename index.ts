@@ -65,6 +65,22 @@ interface ImageJob {
 
 const jobs = new Map<string, ImageJob>();
 
+// Batch job tracking
+interface BatchJob {
+  id: string;
+  jobIds: string[];
+  totalCount: number;
+  createdAt: Date;
+  completedAt?: Date;
+}
+
+const batchJobs = new Map<string, BatchJob>();
+
+// Generate a simple unique batch ID
+function generateBatchId(): string {
+  return `batch_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
 // Available models
 const AVAILABLE_MODELS = [
   "gemini-2.5-flash-image",
@@ -95,6 +111,41 @@ const SaveImageSchema = z.object({
   filePath: z
     .string()
     .describe("Absolute path where the image should be saved (must end in .png)"),
+});
+
+// Batch tool schemas
+const BatchPromptSchema = z.object({
+  prompt: z.string().describe("Text prompt describing the image to generate"),
+  aspectRatio: z
+    .enum(["1:1", "3:4", "4:3", "9:16", "16:9"])
+    .optional()
+    .describe("Aspect ratio for this image (defaults to batch-level setting or 1:1)"),
+  model: z
+    .enum(AVAILABLE_MODELS)
+    .optional()
+    .describe("Model to use for this image (defaults to batch-level setting)"),
+});
+
+const GenerateBatchImagesSchema = z.object({
+  prompts: z.array(BatchPromptSchema).min(1).max(20).describe("Array of image prompts to generate (1-20 images)"),
+  defaultAspectRatio: z
+    .enum(["1:1", "3:4", "4:3", "9:16", "16:9"])
+    .default("1:1")
+    .describe("Default aspect ratio for all images unless overridden per-prompt"),
+  defaultModel: z
+    .enum(AVAILABLE_MODELS)
+    .default("gemini-3-pro-image-preview")
+    .describe("Default model for all images unless overridden per-prompt"),
+});
+
+const CheckBatchStatusSchema = z.object({
+  batchId: z.string().describe("The batch ID returned from generate_batch_images"),
+});
+
+const SaveBatchImagesSchema = z.object({
+  batchId: z.string().describe("The batch ID of the completed batch generation"),
+  directory: z.string().describe("Directory path where images should be saved"),
+  filenamePrefix: z.string().default("image").describe("Prefix for generated filenames (default: 'image')"),
 });
 
 // Generate a simple unique ID
@@ -182,6 +233,157 @@ async function saveImageToFile(jobId: string, filePath: string): Promise<void> {
   await writeFile(absolutePath, buffer);
 }
 
+// Batch image generation function
+type BatchPrompt = z.infer<typeof BatchPromptSchema>;
+
+async function generateBatchImages(
+  prompts: BatchPrompt[],
+  defaultAspectRatio: string,
+  defaultModel: string
+): Promise<{ batchId: string; jobIds: string[] }> {
+  const batchId = generateBatchId();
+  const jobIds: string[] = [];
+
+  // Generate all images in parallel
+  for (const promptConfig of prompts) {
+    const aspectRatio = promptConfig.aspectRatio || defaultAspectRatio;
+    const model = promptConfig.model || defaultModel;
+    const jobId = await generateImage(promptConfig.prompt, aspectRatio, model);
+    jobIds.push(jobId);
+  }
+
+  // Create batch job
+  batchJobs.set(batchId, {
+    id: batchId,
+    jobIds,
+    totalCount: prompts.length,
+    createdAt: new Date(),
+  });
+
+  return { batchId, jobIds };
+}
+
+// Get batch status with aggregated information
+function getBatchStatus(batchId: string): {
+  batchId: string;
+  status: "pending" | "processing" | "completed" | "partial" | "failed";
+  totalCount: number;
+  completedCount: number;
+  failedCount: number;
+  pendingCount: number;
+  processingCount: number;
+  jobs: { jobId: string; status: string; prompt: string }[];
+  createdAt: Date;
+  completedAt?: Date;
+} {
+  const batch = batchJobs.get(batchId);
+  if (!batch) {
+    throw new Error(`Batch ${batchId} not found`);
+  }
+
+  let completedCount = 0;
+  let failedCount = 0;
+  let pendingCount = 0;
+  let processingCount = 0;
+  const jobDetails: { jobId: string; status: string; prompt: string }[] = [];
+
+  for (const jobId of batch.jobIds) {
+    const job = jobs.get(jobId);
+    if (job) {
+      jobDetails.push({
+        jobId: job.id,
+        status: job.status,
+        prompt: job.prompt.substring(0, 50) + (job.prompt.length > 50 ? "..." : ""),
+      });
+
+      switch (job.status) {
+        case "completed":
+          completedCount++;
+          break;
+        case "failed":
+          failedCount++;
+          break;
+        case "pending":
+          pendingCount++;
+          break;
+        case "processing":
+          processingCount++;
+          break;
+      }
+    }
+  }
+
+  // Determine overall batch status
+  let status: "pending" | "processing" | "completed" | "partial" | "failed";
+  const allDone = completedCount + failedCount === batch.totalCount;
+
+  if (allDone) {
+    if (failedCount === batch.totalCount) {
+      status = "failed";
+    } else if (failedCount > 0) {
+      status = "partial";
+    } else {
+      status = "completed";
+    }
+    // Update batch completedAt if all jobs are done
+    if (!batch.completedAt) {
+      batch.completedAt = new Date();
+    }
+  } else if (processingCount > 0 || completedCount > 0) {
+    status = "processing";
+  } else {
+    status = "pending";
+  }
+
+  return {
+    batchId: batch.id,
+    status,
+    totalCount: batch.totalCount,
+    completedCount,
+    failedCount,
+    pendingCount,
+    processingCount,
+    jobs: jobDetails,
+    createdAt: batch.createdAt,
+    completedAt: batch.completedAt,
+  };
+}
+
+// Save all completed images from a batch
+async function saveBatchImages(
+  batchId: string,
+  directory: string,
+  filenamePrefix: string
+): Promise<{ saved: { jobId: string; filePath: string }[]; failed: { jobId: string; error: string }[] }> {
+  const batch = batchJobs.get(batchId);
+  if (!batch) {
+    throw new Error(`Batch ${batchId} not found`);
+  }
+
+  const absoluteDir = resolve(directory);
+  await mkdir(absoluteDir, { recursive: true });
+
+  const saved: { jobId: string; filePath: string }[] = [];
+  const failed: { jobId: string; error: string }[] = [];
+
+  for (let i = 0; i < batch.jobIds.length; i++) {
+    const jobId = batch.jobIds[i];
+    const filePath = join(absoluteDir, `${filenamePrefix}_${i + 1}.png`);
+
+    try {
+      await saveImageToFile(jobId, filePath);
+      saved.push({ jobId, filePath });
+    } catch (error) {
+      failed.push({
+        jobId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return { saved, failed };
+}
+
 // Create MCP server
 const server = new Server(
   {
@@ -265,6 +467,103 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "list_jobs",
         description:
           "See all your image generation requests and whether they're still processing, completed, or failed. Useful to track multiple images at once.",
+        inputSchema: {
+          type: "object",
+          properties: {},
+        },
+      },
+      {
+        name: "generate_batch_images",
+        description:
+          "Generate multiple images at once from a list of prompts. Returns a batch ID to track all images together. Use check_batch_status to monitor progress and save_batch_images to save all completed images.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            prompts: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  prompt: {
+                    type: "string",
+                    description: "Text description of the image to generate",
+                  },
+                  aspectRatio: {
+                    type: "string",
+                    enum: ["1:1", "3:4", "4:3", "9:16", "16:9"],
+                    description: "Optional aspect ratio override for this specific image",
+                  },
+                  model: {
+                    type: "string",
+                    enum: ["gemini-3-pro-image-preview", "gemini-2.5-flash-image", "gemini-2.5-flash-image-preview", "gemini-2.0-flash-exp-image-generation"],
+                    description: "Optional model override for this specific image",
+                  },
+                },
+                required: ["prompt"],
+              },
+              minItems: 1,
+              maxItems: 20,
+              description: "Array of 1-20 image prompts to generate",
+            },
+            defaultAspectRatio: {
+              type: "string",
+              enum: ["1:1", "3:4", "4:3", "9:16", "16:9"],
+              default: "1:1",
+              description: "Default aspect ratio for all images (can be overridden per-prompt)",
+            },
+            defaultModel: {
+              type: "string",
+              enum: ["gemini-3-pro-image-preview", "gemini-2.5-flash-image", "gemini-2.5-flash-image-preview", "gemini-2.0-flash-exp-image-generation"],
+              default: "gemini-3-pro-image-preview",
+              description: "Default model for all images (can be overridden per-prompt)",
+            },
+          },
+          required: ["prompts"],
+        },
+      },
+      {
+        name: "check_batch_status",
+        description:
+          "Check the progress of a batch image generation. Shows how many images are completed, processing, or failed.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            batchId: {
+              type: "string",
+              description: "The batch ID you received from generate_batch_images",
+            },
+          },
+          required: ["batchId"],
+        },
+      },
+      {
+        name: "save_batch_images",
+        description:
+          "Save all completed images from a batch to a directory. Images are named with a prefix and number (e.g., image_1.png, image_2.png).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            batchId: {
+              type: "string",
+              description: "The batch ID from your batch generation",
+            },
+            directory: {
+              type: "string",
+              description: "Directory path where all images should be saved (e.g., '/Users/yourname/Pictures/batch')",
+            },
+            filenamePrefix: {
+              type: "string",
+              default: "image",
+              description: "Prefix for filenames (default: 'image'). Files will be named prefix_1.png, prefix_2.png, etc.",
+            },
+          },
+          required: ["batchId", "directory"],
+        },
+      },
+      {
+        name: "list_batches",
+        description:
+          "See all your batch image generation requests and their overall status.",
         inputSchema: {
           type: "object",
           properties: {},
@@ -380,6 +679,143 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 {
                   totalJobs: jobList.length,
                   jobs: jobList,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      case "generate_batch_images": {
+        const {
+          prompts,
+          defaultAspectRatio = "1:1",
+          defaultModel = "gemini-3-pro-image-preview",
+        } = GenerateBatchImagesSchema.parse(args);
+
+        const { batchId, jobIds } = await generateBatchImages(
+          prompts,
+          defaultAspectRatio,
+          defaultModel
+        );
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  batchId,
+                  jobIds,
+                  totalImages: prompts.length,
+                  status: "pending",
+                  message:
+                    "Batch image generation started. Use check_batch_status to monitor progress.",
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      case "check_batch_status": {
+        const { batchId } = CheckBatchStatusSchema.parse(args);
+        const status = getBatchStatus(batchId);
+
+        const response: any = {
+          batchId: status.batchId,
+          status: status.status,
+          progress: `${status.completedCount}/${status.totalCount} completed`,
+          totalCount: status.totalCount,
+          completedCount: status.completedCount,
+          processingCount: status.processingCount,
+          pendingCount: status.pendingCount,
+          failedCount: status.failedCount,
+          createdAt: status.createdAt.toISOString(),
+          jobs: status.jobs,
+        };
+
+        if (status.completedAt) {
+          response.completedAt = status.completedAt.toISOString();
+        }
+
+        if (status.status === "completed") {
+          response.message =
+            "All images completed successfully. Use save_batch_images to save all images.";
+        } else if (status.status === "partial") {
+          response.message =
+            "Batch completed with some failures. Use save_batch_images to save successful images.";
+        } else if (status.status === "failed") {
+          response.message = "All images failed to generate.";
+        } else {
+          response.message = `Batch is ${status.status}. Please check again later.`;
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(response, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "save_batch_images": {
+        const {
+          batchId,
+          directory,
+          filenamePrefix = "image",
+        } = SaveBatchImagesSchema.parse(args);
+
+        const result = await saveBatchImages(batchId, directory, filenamePrefix);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  success: result.saved.length > 0,
+                  message: `Saved ${result.saved.length} images to ${directory}`,
+                  savedCount: result.saved.length,
+                  failedCount: result.failed.length,
+                  saved: result.saved,
+                  failed: result.failed.length > 0 ? result.failed : undefined,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      case "list_batches": {
+        const batchList = Array.from(batchJobs.values()).map((batch) => {
+          const status = getBatchStatus(batch.id);
+          return {
+            batchId: batch.id,
+            status: status.status,
+            progress: `${status.completedCount}/${status.totalCount}`,
+            totalCount: batch.totalCount,
+            createdAt: batch.createdAt.toISOString(),
+            completedAt: batch.completedAt?.toISOString(),
+          };
+        });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  totalBatches: batchList.length,
+                  batches: batchList,
                 },
                 null,
                 2
